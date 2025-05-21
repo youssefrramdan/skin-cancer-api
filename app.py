@@ -3,7 +3,8 @@ import cv2
 import numpy as np
 import tflite_runtime.interpreter as tflite
 from flask import Flask, request, jsonify
-import base64
+import requests
+from urllib.parse import urlparse
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -22,10 +23,25 @@ output_details = interpreter.get_output_details()
 # Class names for prediction
 class_names = ["BCC", "MEL", "SCC"]
 
-def process_image_from_bytes(image_bytes):
-    # Convert bytes to numpy array
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+def is_valid_url(url):
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
+def process_image_from_url(image_url):
+    # Download image from URL
+    response = requests.get(image_url, timeout=10)
+    if response.status_code != 200:
+        raise Exception("Failed to download image")
+
+    # Convert to numpy array
+    image_array = np.frombuffer(response.content, np.uint8)
+    image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+
+    if image is None:
+        raise Exception("Invalid image format")
 
     # Process image
     image = cv2.resize(image, (256, 256))
@@ -33,11 +49,6 @@ def process_image_from_bytes(image_bytes):
     image = image.astype(np.float32)
     image = np.expand_dims(image, axis=0)
     return image
-
-def process_image_from_base64(base64_string):
-    # Decode base64 string to image bytes
-    img_data = base64.b64decode(base64_string)
-    return process_image_from_bytes(img_data)
 
 def get_prediction(image):
     # Set input tensor
@@ -67,26 +78,41 @@ def home():
     return jsonify({
         'status': 'API is running',
         'endpoints': {
-            '/api/predict': 'POST - Send image for prediction'
+            '/api/predict': 'POST - Send image URL for prediction'
+        },
+        'example_request': {
+            'url': 'https://example.com/image.jpg'
         }
     })
 
 @app.route('/api/predict', methods=['POST'])
 def predict():
     try:
-        # Handle file upload
-        if 'file' in request.files:
-            file = request.files['file']
-            file_bytes = file.read()
-            processed_image = process_image_from_bytes(file_bytes)
-
-        # Handle base64 image
-        elif 'image' in request.json:
-            base64_string = request.json['image']
-            processed_image = process_image_from_base64(base64_string)
-        else:
+        # Get image URL from request
+        data = request.get_json()
+        if not data or 'url' not in data:
             return jsonify({
-                'error': 'No image provided'
+                'error': 'No image URL provided',
+                'example': {
+                    'url': 'https://example.com/image.jpg'
+                }
+            }), 400
+
+        image_url = data['url']
+
+        # Validate URL
+        if not is_valid_url(image_url):
+            return jsonify({
+                'error': 'Invalid URL format'
+            }), 400
+
+        # Process image from URL
+        try:
+            processed_image = process_image_from_url(image_url)
+        except Exception as e:
+            return jsonify({
+                'error': 'Failed to process image',
+                'details': str(e)
             }), 400
 
         # Make prediction
@@ -97,7 +123,8 @@ def predict():
         return jsonify({
             'predicted_class': predicted_class,
             'confidence': confidence,
-            'diagnosis': diagnosis
+            'diagnosis': diagnosis,
+            'input_url': image_url
         })
 
     except Exception as e:
@@ -106,6 +133,5 @@ def predict():
         }), 500
 
 if __name__ == '__main__':
-    # Get port from environment variable or use 5000
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
